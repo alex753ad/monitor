@@ -635,7 +635,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📍 Pairs Position Monitor")
-st.caption("v15.0 | 24.02.2026 | R3 Auto-Import + Z-direction fix + HR validation")
+st.caption("v16.0 | 24.02.2026 | Color fix + Z-direction + R3 Auto-Import + HR validation")
 
 # Sidebar
 with st.sidebar:
@@ -826,9 +826,19 @@ with tab1:
                 # KPI row
                 c1, c2, c3, c4, c5, c6 = st.columns(6)
                 
-                pnl_color = "normal" if mon['pnl_pct'] > 0 else "inverse"
-                c1.metric("P&L", f"{mon['pnl_pct']:+.2f}%", 
-                         delta="profit" if mon['pnl_pct'] > 0 else "loss")
+                # v23: Fix color display — Streamlit colors delta green=up, red=down
+                # v24: P&L with CORRECT coloring
+                # Streamlit st.metric: numeric delta → green if positive, red if negative
+                # String delta "loss" was showing as green text — WRONG!
+                # Fix: pass NUMERIC delta so Streamlit applies correct color
+                pnl_val = mon['pnl_pct']
+                pnl_emoji = "🟢" if pnl_val > 0.01 else "🔴" if pnl_val < -0.01 else "⚪"
+                c1.metric(
+                    f"P&L {pnl_emoji}", 
+                    f"{pnl_val:+.2f}%", 
+                    delta=f"{pnl_val:+.2f}%",  # String starting with - → red, + → green
+                    delta_color="normal"  # positive=green, negative=red
+                )
                 
                 # v22: Directional Z explanation
                 z_dir_ok = mon.get('z_towards_zero', False)
@@ -844,12 +854,34 @@ with tab1:
                          delta=z_delta_text)
                 c3.metric("HR", f"{mon['hr_now']:.4f}",
                          delta=f"вход: {mon['hr_entry']:.4f}")
-                c4.metric(f"{pos['coin1']} {'🟢' if pos['direction']=='LONG' else '🔴'}", 
-                         f"${mon['price1_now']:.4f}",
-                         delta=f"вход: ${pos['entry_price1']:.4f}")
-                c5.metric(f"{pos['coin2']} {'🔴' if pos['direction']=='LONG' else '🟢'}", 
-                         f"${mon['price2_now']:.4f}",
-                         delta=f"вход: ${pos['entry_price2']:.4f}")
+                
+                # v23: Price display with directional coloring
+                # Coin1: LONG=want price UP, SHORT=want price DOWN
+                p1_now = mon['price1_now']
+                p1_entry = pos['entry_price1']
+                p1_change = (p1_now - p1_entry) / p1_entry * 100 if p1_entry > 0 else 0
+                # For LONG coin1: price up = good (green), For SHORT coin1: price down = good
+                p1_good = (pos['direction'] == 'LONG' and p1_change >= 0) or \
+                          (pos['direction'] == 'SHORT' and p1_change <= 0)
+                c4.metric(
+                    f"{pos['coin1']} {'🟢' if pos['direction']=='LONG' else '🔴'}", 
+                    f"${p1_now:.4f}",
+                    delta=f"{p1_change:+.2f}% (вход: ${p1_entry:.4f})",
+                    delta_color="normal" if p1_good else "inverse")
+                
+                # Coin2: opposite direction to coin1
+                p2_now = mon['price2_now']
+                p2_entry = pos['entry_price2']
+                p2_change = (p2_now - p2_entry) / p2_entry * 100 if p2_entry > 0 else 0
+                # For LONG: coin2 is SHORT (want price down), For SHORT: coin2 is LONG (want price up)
+                p2_good = (pos['direction'] == 'LONG' and p2_change <= 0) or \
+                          (pos['direction'] == 'SHORT' and p2_change >= 0)
+                c5.metric(
+                    f"{pos['coin2']} {'🔴' if pos['direction']=='LONG' else '🟢'}", 
+                    f"${p2_now:.4f}",
+                    delta=f"{p2_change:+.2f}% (вход: ${p2_entry:.4f})",
+                    delta_color="normal" if p2_good else "inverse")
+                
                 c6.metric("В позиции", f"{mon['hours_in']:.0f}ч",
                          delta=f"HL: {mon['halflife_hours']:.0f}ч")
                 
