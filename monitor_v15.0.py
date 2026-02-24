@@ -266,6 +266,7 @@ def add_position(coin1, coin2, direction, entry_z, entry_hr,
 
 def close_position(pos_id, exit_price1, exit_price2, exit_z, reason):
     positions = load_positions()
+    closed_pos = None
     for p in positions:
         if p['id'] == pos_id and p['status'] == 'OPEN':
             p['status'] = 'CLOSED'
@@ -283,8 +284,84 @@ def close_position(pos_id, exit_price1, exit_price2, exit_z, reason):
             else:
                 raw = -r1 + hr * r2
             p['pnl_pct'] = round(raw / (1 + abs(hr)) * 100, 3)
+            closed_pos = p.copy()
             break
     save_positions(positions)
+    
+    # v25: R8 Performance Tracker — save to persistent history
+    if closed_pos:
+        try:
+            save_trade_to_history(closed_pos)
+        except Exception:
+            pass
+
+
+def save_trade_to_history(trade):
+    """R8: Save closed trade to persistent CSV history."""
+    import csv
+    history_file = "trade_history.csv"
+    fields = [
+        'id', 'pair', 'coin1', 'coin2', 'direction', 'timeframe',
+        'entry_z', 'exit_z', 'entry_hr', 'pnl_pct',
+        'entry_time', 'exit_time', 'exit_reason',
+        'entry_price1', 'entry_price2', 'exit_price1', 'exit_price2',
+        'notes', 'best_pnl',
+    ]
+    
+    row = {
+        'id': trade.get('id', 0),
+        'pair': f"{trade.get('coin1', '')}/{trade.get('coin2', '')}",
+        'coin1': trade.get('coin1', ''),
+        'coin2': trade.get('coin2', ''),
+        'direction': trade.get('direction', ''),
+        'timeframe': trade.get('timeframe', '4h'),
+        'entry_z': trade.get('entry_z', 0),
+        'exit_z': trade.get('exit_z', 0),
+        'entry_hr': trade.get('entry_hr', 0),
+        'pnl_pct': trade.get('pnl_pct', 0),
+        'entry_time': trade.get('entry_time', ''),
+        'exit_time': trade.get('exit_time', ''),
+        'exit_reason': trade.get('exit_reason', ''),
+        'entry_price1': trade.get('entry_price1', 0),
+        'entry_price2': trade.get('entry_price2', 0),
+        'exit_price1': trade.get('exit_price1', 0),
+        'exit_price2': trade.get('exit_price2', 0),
+        'notes': trade.get('notes', ''),
+        'best_pnl': trade.get('best_pnl', 0),
+    }
+    
+    file_exists = os.path.exists(history_file)
+    with open(history_file, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def load_trade_history():
+    """R8: Load all trade history."""
+    import csv
+    history_file = "trade_history.csv"
+    if not os.path.exists(history_file):
+        return []
+    
+    with open(history_file, 'r') as f:
+        reader = csv.DictReader(f)
+        trades = []
+        for row in reader:
+            # Convert numeric fields
+            for k in ['entry_z', 'exit_z', 'entry_hr', 'pnl_pct', 
+                       'entry_price1', 'entry_price2', 'exit_price1', 'exit_price2', 'best_pnl']:
+                try:
+                    row[k] = float(row.get(k, 0) or 0)
+                except (ValueError, TypeError):
+                    row[k] = 0
+            try:
+                row['id'] = int(row.get('id', 0) or 0)
+            except:
+                row['id'] = 0
+            trades.append(row)
+    return trades
 
 
 # ═══════════════════════════════════════════════════════
@@ -712,7 +789,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📍 Pairs Position Monitor")
-st.caption("v17.0 | 24.02.2026 | R5 Smart Exit + R4 Z-velocity + Color fix + Auto-Import")
+st.caption("v18.0 | 24.02.2026 | R8 Performance + R5 Smart Exit + Non-blocking refresh + Color fix")
 
 # Sidebar
 with st.sidebar:
@@ -854,9 +931,10 @@ open_positions = [p for p in positions if p['status'] == 'OPEN']
 closed_positions = [p for p in positions if p['status'] == 'CLOSED']
 
 # Tabs
-tab1, tab2, tab3 = st.tabs([f"📍 Открытые ({len(open_positions)})", 
+tab1, tab2, tab3, tab4 = st.tabs([f"📍 Открытые ({len(open_positions)})", 
                        f"📋 История ({len(closed_positions)})",
-                       f"📊 Портфель"])
+                       f"📊 Портфель",
+                       f"📈 Performance (R8)"])
 
 with tab1:
     if not open_positions:
@@ -1498,9 +1576,237 @@ with tab3:
                     pass
 
 # Auto refresh
+# v26: Non-blocking auto-refresh using JS timer
 if auto_refresh:
-    time.sleep(120)
-    st.rerun()
+    try:
+        import streamlit.components.v1 as components
+        components.html(
+            """<script>
+            setTimeout(function() {
+                window.parent.location.reload();
+            }, 120000);
+            </script>""",
+            height=0
+        )
+        st.info("⏱️ Авто-обновление через 2 мин...")
+    except Exception:
+        time.sleep(120)
+        st.rerun()
+
+# ═══════════════════════════════════════════════════════
+# TAB 4: R8 Performance Tracker
+# ═══════════════════════════════════════════════════════
+with tab4:
+    st.markdown("### 📈 Performance Tracker (R8)")
+    st.caption("Накопительная статистика по всем закрытым сделкам")
+    
+    # Load history from persistent file + current session closed
+    history = load_trade_history()
+    
+    # Also include closed positions from current session that might not be in history yet
+    history_ids = {t.get('id', 0) for t in history}
+    for cp in closed_positions:
+        if cp.get('id', 0) not in history_ids:
+            history.append({
+                'id': cp.get('id', 0),
+                'pair': f"{cp.get('coin1', '')}/{cp.get('coin2', '')}",
+                'coin1': cp.get('coin1', ''), 'coin2': cp.get('coin2', ''),
+                'direction': cp.get('direction', ''),
+                'timeframe': cp.get('timeframe', '4h'),
+                'entry_z': cp.get('entry_z', 0), 'exit_z': cp.get('exit_z', 0),
+                'entry_hr': cp.get('entry_hr', 0), 'pnl_pct': cp.get('pnl_pct', 0),
+                'entry_time': cp.get('entry_time', ''),
+                'exit_time': cp.get('exit_time', ''),
+                'exit_reason': cp.get('exit_reason', ''),
+                'entry_price1': cp.get('entry_price1', 0),
+                'entry_price2': cp.get('entry_price2', 0),
+                'exit_price1': cp.get('exit_price1', 0),
+                'exit_price2': cp.get('exit_price2', 0),
+                'notes': cp.get('notes', ''),
+                'best_pnl': cp.get('best_pnl', 0),
+            })
+    
+    if not history:
+        st.info("📭 Нет закрытых сделок в истории. Закройте позицию чтобы начать накапливать статистику.")
+        st.markdown("💡 **Ручной импорт:** Загрузите CSV с прошлыми сделками.")
+        
+        uploaded_hist = st.file_uploader("📤 Импорт истории (CSV)", type=['csv'], key='hist_import')
+        if uploaded_hist:
+            try:
+                import io
+                hist_df = pd.read_csv(io.StringIO(uploaded_hist.getvalue().decode()))
+                st.dataframe(hist_df)
+                
+                if st.button("✅ Импортировать эти сделки"):
+                    for _, row in hist_df.iterrows():
+                        trade = {
+                            'id': int(row.get('#', row.get('id', 0))),
+                            'coin1': str(row.get('Пара', '')).split('/')[0] if '/' in str(row.get('Пара', '')) else '',
+                            'coin2': str(row.get('Пара', '')).split('/')[1] if '/' in str(row.get('Пара', '')) else '',
+                            'direction': row.get('Dir', row.get('direction', '')),
+                            'timeframe': row.get('TF', row.get('timeframe', '4h')),
+                            'entry_z': float(str(row.get('Entry Z', row.get('entry_z', 0))).replace('+', '')),
+                            'exit_z': float(str(row.get('Exit Z', row.get('exit_z', 0))).replace('+', '')),
+                            'entry_hr': float(row.get('entry_hr', 1.0)),
+                            'pnl_pct': float(str(row.get('P&L %', row.get('pnl_pct', 0))).replace('+', '').replace('%', '')),
+                            'entry_time': str(row.get('Вход', row.get('entry_time', ''))),
+                            'exit_time': str(row.get('Выход', row.get('exit_time', ''))),
+                            'exit_reason': str(row.get('Причина', row.get('exit_reason', 'MANUAL'))),
+                            'notes': '',
+                            'best_pnl': 0,
+                            'entry_price1': 0, 'entry_price2': 0,
+                            'exit_price1': 0, 'exit_price2': 0,
+                        }
+                        save_trade_to_history(trade)
+                    st.success(f"✅ Импортировано {len(hist_df)} сделок!")
+                    st.rerun()
+            except Exception as ex:
+                st.error(f"❌ Ошибка импорта: {ex}")
+    else:
+        # === DASHBOARD ===
+        pnls = [float(t.get('pnl_pct', 0)) for t in history]
+        n_trades = len(history)
+        total_pnl = sum(pnls)
+        winners = sum(1 for p in pnls if p > 0)
+        losers = sum(1 for p in pnls if p < 0)
+        win_rate = winners / n_trades * 100 if n_trades > 0 else 0
+        avg_pnl = total_pnl / n_trades if n_trades > 0 else 0
+        avg_win = np.mean([p for p in pnls if p > 0]) if winners > 0 else 0
+        avg_loss = np.mean([p for p in pnls if p < 0]) if losers > 0 else 0
+        pf = abs(sum(p for p in pnls if p > 0) / sum(p for p in pnls if p < 0)) if losers > 0 and sum(p for p in pnls if p < 0) != 0 else float('inf')
+        
+        # Max drawdown
+        cumulative = np.cumsum(pnls)
+        peak = np.maximum.accumulate(cumulative)
+        drawdown = cumulative - peak
+        max_dd = min(drawdown) if len(drawdown) > 0 else 0
+        
+        # Metrics row 1
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Всего сделок", n_trades)
+        m2.metric("Суммарный P&L", f"{total_pnl:+.2f}%",
+                 delta=f"{total_pnl:+.2f}%", delta_color="normal")
+        m3.metric("Win Rate", f"{win_rate:.0f}%",
+                 delta=f"{winners}W / {losers}L")
+        m4.metric("Avg P&L", f"{avg_pnl:+.3f}%")
+        m5.metric("Profit Factor", f"{pf:.2f}" if pf < 100 else "∞")
+        
+        # Metrics row 2
+        m6, m7, m8, m9 = st.columns(4)
+        m6.metric("Avg Win", f"{avg_win:+.3f}%")
+        m7.metric("Avg Loss", f"{avg_loss:+.3f}%")
+        m8.metric("Max Drawdown", f"{max_dd:+.2f}%")
+        
+        # Best streak
+        streaks = []
+        current_streak = 0
+        for p in pnls:
+            if p > 0:
+                current_streak += 1
+            else:
+                if current_streak > 0:
+                    streaks.append(current_streak)
+                current_streak = 0
+        if current_streak > 0:
+            streaks.append(current_streak)
+        best_streak = max(streaks) if streaks else 0
+        m9.metric("Best Win Streak", f"{best_streak}")
+        
+        # === EQUITY CURVE ===
+        st.markdown("#### 📈 Equity Curve")
+        import plotly.graph_objects as go
+        
+        cum_pnl = list(np.cumsum(pnls))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            y=[0] + cum_pnl,
+            mode='lines+markers',
+            name='Cumulative P&L',
+            line=dict(color='#00c853', width=2),
+            marker=dict(size=5, color=['green' if p > 0 else 'red' for p in [0] + list(pnls)])
+        ))
+        fig.update_layout(
+            height=300, margin=dict(l=0, r=0, t=30, b=0),
+            yaxis_title="Cumulative P&L %",
+            xaxis_title="Trade #",
+            template="plotly_dark"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # === BY PAIR ANALYSIS ===
+        st.markdown("#### 🪙 Статистика по парам")
+        pair_stats = {}
+        for t in history:
+            pair = t.get('pair', f"{t.get('coin1','')}/{t.get('coin2','')}")
+            if pair not in pair_stats:
+                pair_stats[pair] = {'pnls': [], 'count': 0}
+            pair_stats[pair]['pnls'].append(float(t.get('pnl_pct', 0)))
+            pair_stats[pair]['count'] += 1
+        
+        pair_rows = []
+        for pair, stats in sorted(pair_stats.items(), key=lambda x: sum(x[1]['pnls']), reverse=True):
+            ppnls = stats['pnls']
+            pair_rows.append({
+                'Пара': pair,
+                'Сделок': stats['count'],
+                'Total P&L': f"{sum(ppnls):+.2f}%",
+                'Avg P&L': f"{np.mean(ppnls):+.3f}%",
+                'WR': f"{sum(1 for p in ppnls if p > 0)/len(ppnls)*100:.0f}%",
+                'Best': f"{max(ppnls):+.2f}%",
+                'Worst': f"{min(ppnls):+.2f}%",
+            })
+        if pair_rows:
+            st.dataframe(pd.DataFrame(pair_rows), use_container_width=True, hide_index=True)
+        
+        # === BY DAY ANALYSIS ===
+        st.markdown("#### 📅 Статистика по дням")
+        day_stats = {}
+        for t in history:
+            day = str(t.get('exit_time', t.get('entry_time', '')))[:10]
+            if day and day != 'None':
+                if day not in day_stats:
+                    day_stats[day] = {'pnls': [], 'count': 0}
+                day_stats[day]['pnls'].append(float(t.get('pnl_pct', 0)))
+                day_stats[day]['count'] += 1
+        
+        day_rows = []
+        for day, stats in sorted(day_stats.items()):
+            dpnls = stats['pnls']
+            day_rows.append({
+                'Дата': day,
+                'Сделок': stats['count'],
+                'Total P&L': f"{sum(dpnls):+.2f}%",
+                'WR': f"{sum(1 for p in dpnls if p > 0)/len(dpnls)*100:.0f}%",
+                'Avg P&L': f"{np.mean(dpnls):+.3f}%",
+            })
+        if day_rows:
+            st.dataframe(pd.DataFrame(day_rows), use_container_width=True, hide_index=True)
+        
+        # === TRADES TABLE ===
+        st.markdown("#### 📋 Все сделки")
+        trade_rows = []
+        for t in reversed(history):
+            trade_rows.append({
+                '#': t.get('id', ''),
+                'Пара': t.get('pair', ''),
+                'Dir': t.get('direction', ''),
+                'Entry Z': f"{float(t.get('entry_z', 0)):+.2f}",
+                'Exit Z': f"{float(t.get('exit_z', 0)):+.2f}",
+                'P&L': f"{float(t.get('pnl_pct', 0)):+.2f}%",
+                'Причина': t.get('exit_reason', ''),
+                'Вход': str(t.get('entry_time', ''))[-5:],
+                'Выход': str(t.get('exit_time', ''))[-5:],
+            })
+        if trade_rows:
+            st.dataframe(pd.DataFrame(trade_rows), use_container_width=True, hide_index=True)
+        
+        # === EXPORT ===
+        st.markdown("#### 📥 Экспорт")
+        hist_df = pd.DataFrame(history)
+        csv_hist = hist_df.to_csv(index=False)
+        st.download_button("📥 Скачать полную историю (CSV)", csv_hist,
+                          f"trade_history_{now_msk().strftime('%Y%m%d_%H%M')}.csv",
+                          "text/csv", key="hist_export_btn")
 
 st.divider()
 st.caption("""
