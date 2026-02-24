@@ -34,6 +34,8 @@ try:
         calc_halflife_from_spread,
         assess_entry_readiness,
         check_pnl_z_disagreement,
+        smart_exit_analysis,
+        z_velocity_analysis,
     )
     _USE_MRA = True
 except ImportError:
@@ -617,6 +619,81 @@ def monitor_position(pos, exchange_name):
         'garch_vol_ratio': garch_vol_ratio,
         'garch_var_expanding': garch_var_expanding,
     }
+    
+    # v24: R5 Smart Exit Analysis
+    if _USE_MRA:
+        try:
+            smart_exit = smart_exit_analysis(
+                z_entry=pos['entry_z'],
+                z_now=z_now,
+                z_history=zs[~np.isnan(zs)] if len(zs) > 0 else np.array([z_now]),
+                pnl_pct=pnl_pct,
+                hours_in=hours_in,
+                halflife_hours=hl_hours,
+                direction=pos['direction'],
+                best_pnl=pos.get('best_pnl', max(pnl_pct, 0)),
+            )
+            result_dict = {**{k: v for k, v in locals().items() 
+                            if k in ('z_now', 'z_garch', 'garch_vol_ratio', 'garch_var_expanding',
+                                    'pnl_pct', 'spread_direction', 'z_towards_zero',
+                                    'pnl_z_disagree', 'pnl_z_warning', 'exit_signal',
+                                    'exit_urgency', 'hours_in', 'hl_hours', 'hurst',
+                                    'corr', 'pvalue', 'quality_data', 'quality_warnings')}}
+            # Merge smart exit signals
+            result_dict = {
+                'z_now': z_now, 'z_entry': pos['entry_z'],
+                'pnl_pct': pnl_pct, 'spread_direction': spread_direction,
+                'z_towards_zero': z_towards_zero,
+                'pnl_z_disagree': pnl_z_disagree, 'pnl_z_warning': pnl_z_warning,
+                'price1_now': p1[-1], 'price2_now': p2[-1],
+                'hr_now': hr_current, 'hr_entry': pos['entry_hr'],
+                'exit_signal': exit_signal, 'exit_urgency': exit_urgency,
+                'hours_in': hours_in, 'spread': spread,
+                'zscore_series': zs, 'timestamps': ts,
+                'hr_series': kf['hrs'], 'halflife_hours': hl_hours,
+                'z_window': zw, 'hurst': hurst, 'correlation': corr,
+                'pvalue': pvalue, 'quality_data': quality_data,
+                'quality_warnings': quality_warnings,
+                'z_garch': z_garch, 'garch_vol_ratio': garch_vol_ratio,
+                'garch_var_expanding': garch_var_expanding,
+                # R5 Smart Exit
+                'smart_exit': smart_exit,
+                'smart_signals': smart_exit.get('signals', []),
+                'smart_recommendation': smart_exit.get('recommendation', ''),
+                'smart_urgency': smart_exit.get('urgency', 0),
+            }
+            
+            # Override exit_signal if smart exit has higher urgency
+            if smart_exit.get('urgency', 0) > exit_urgency:
+                result_dict['exit_urgency'] = smart_exit['urgency']
+                # Combine signals
+                smart_msgs = [s['message'] for s in smart_exit.get('signals', [])]
+                if smart_msgs:
+                    result_dict['exit_signal'] = ' | '.join(smart_msgs[:2])
+            
+            return result_dict
+        except Exception:
+            pass
+    
+    return {
+        'z_now': z_now, 'z_entry': pos['entry_z'],
+        'pnl_pct': pnl_pct, 'spread_direction': spread_direction,
+        'z_towards_zero': z_towards_zero,
+        'pnl_z_disagree': pnl_z_disagree, 'pnl_z_warning': pnl_z_warning,
+        'price1_now': p1[-1], 'price2_now': p2[-1],
+        'hr_now': hr_current, 'hr_entry': pos['entry_hr'],
+        'exit_signal': exit_signal, 'exit_urgency': exit_urgency,
+        'hours_in': hours_in, 'spread': spread,
+        'zscore_series': zs, 'timestamps': ts,
+        'hr_series': kf['hrs'], 'halflife_hours': hl_hours,
+        'z_window': zw, 'hurst': hurst, 'correlation': corr,
+        'pvalue': pvalue, 'quality_data': quality_data,
+        'quality_warnings': quality_warnings,
+        'z_garch': z_garch, 'garch_vol_ratio': garch_vol_ratio,
+        'garch_var_expanding': garch_var_expanding,
+        'smart_exit': None, 'smart_signals': [],
+        'smart_recommendation': '', 'smart_urgency': 0,
+    }
 
 
 # ═══════════════════════════════════════════════════════
@@ -635,7 +712,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📍 Pairs Position Monitor")
-st.caption("v16.0 | 24.02.2026 | Color fix + Z-direction + R3 Auto-Import + HR validation")
+st.caption("v17.0 | 24.02.2026 | R5 Smart Exit + R4 Z-velocity + Color fix + Auto-Import")
 
 # Sidebar
 with st.sidebar:
@@ -806,12 +883,43 @@ with tab1:
                 
                 total_pnl += mon['pnl_pct']
                 
+                # v24: Track best P&L for trailing stop
+                current_best = pos.get('best_pnl', 0)
+                if mon['pnl_pct'] > current_best:
+                    pos['best_pnl'] = mon['pnl_pct']
+                    # Save updated best_pnl
+                    try:
+                        all_pos = load_positions()
+                        for p in all_pos:
+                            if p['id'] == pos['id']:
+                                p['best_pnl'] = mon['pnl_pct']
+                        save_positions(all_pos)
+                    except Exception:
+                        pass
+                
                 # Exit signal banner
                 if mon['exit_signal']:
-                    if 'STOP' in mon['exit_signal']:
+                    if 'STOP' in mon['exit_signal'] or 'СРОЧН' in str(mon['exit_signal']):
                         st.error(mon['exit_signal'])
-                    else:
+                    elif 'MEAN REVERT' in mon['exit_signal'] or 'OVERSHOOT' in mon['exit_signal']:
                         st.success(mon['exit_signal'])
+                    else:
+                        st.warning(mon['exit_signal'])
+                
+                # v24: R5 Smart Exit Signals panel
+                smart_sigs = mon.get('smart_signals', [])
+                smart_rec = mon.get('smart_recommendation', '')
+                if smart_sigs:
+                    with st.expander(f"🧠 Smart Exit: {smart_rec} ({len(smart_sigs)} сигнал{'ов' if len(smart_sigs) > 1 else ''})", expanded=mon.get('smart_urgency', 0) >= 2):
+                        for sig in smart_sigs:
+                            sig_type = sig.get('type', '')
+                            sig_urg = sig.get('urgency', 0)
+                            if sig_urg >= 3:
+                                st.error(sig['message'])
+                            elif sig_urg >= 2:
+                                st.warning(sig['message'])
+                            else:
+                                st.info(sig['message'])
                 
                 # Header row
                 dir_emoji_c1 = '🟢 LONG' if pos['direction'] == 'LONG' else '🔴 SHORT'
